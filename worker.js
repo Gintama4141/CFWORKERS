@@ -12,6 +12,7 @@ let proxyIP = "";
 let cachedProxyList = [];
 
 // Constant
+const DOH_SERVER = "https://doh.dns.sb/dns-query";
 const PROXY_HEALTH_CHECK_API = "https://p01--boiling-frame--kw6dd7bjv2nr.code.run/check";
 const PROXY_PER_PAGE = 24;
 const WS_READY_STATE_OPEN = 1;
@@ -163,7 +164,7 @@ export default {
 
         if (proxyMatch) {
           proxyIP = proxyMatch[1];
-          return await websockerHandler(request);
+          return await websocketHandler(request);
         }
       }
 
@@ -248,7 +249,7 @@ export default {
   },
 };
 
-async function websockerHandler(request) {
+async function websocketHandler(request) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
 
@@ -412,7 +413,7 @@ async function handleTCPOutBound(
 }
 
 async function handleUDPOutbound(webSocket, responseHeader, log) {
-  let isVlessHeaderSent = false;
+  let isHeaderSent = false;
   const transformStream = new TransformStream({
     start(controller) {},
     transform(chunk, controller) {
@@ -430,7 +431,7 @@ async function handleUDPOutbound(webSocket, responseHeader, log) {
     .pipeTo(
       new WritableStream({
         async write(chunk) {
-          const resp = await fetch("https://1.1.1.1/dns-query", {
+          const resp = await fetch(DOH_SERVER, {
             method: "POST",
             headers: {
               "content-type": "application/dns-message",
@@ -442,11 +443,11 @@ async function handleUDPOutbound(webSocket, responseHeader, log) {
           const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
           if (webSocket.readyState === WS_READY_STATE_OPEN) {
             log(`doh success and dns message length is ${udpSize}`);
-            if (isVlessHeaderSent) {
+            if (isHeaderSent) {
               webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
             } else {
               webSocket.send(await new Blob([responseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-              isVlessHeaderSent = true;
+              isHeaderSent = true;
             }
           }
         },
@@ -953,6 +954,59 @@ let baseHTML = `
       <div class="fixed z-20 top-0 w-full h-full bg-white dark:bg-neutral-800">
         <p id="container-window-info" class="text-center w-full h-full top-1/4 absolute dark:text-white"></p>
       </div>
+      <!-- Output Format -->
+      <div id="output-window" class="fixed z-20 top-0 right-0 w-full h-full flex justify-center items-center hidden">
+        <div class="w-[75%] h-[30%] flex flex-col gap-1 p-1 text-center rounded-md">
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-between">
+              <button
+                onclick="copyToClipboardAsTarget('clash')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                Clash
+              </button>
+              <button
+                onclick="copyToClipboardAsTarget('sfa')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                SFA
+              </button>
+              <button
+                onclick="copyToClipboardAsTarget('bfr')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                BFR
+              </button>
+            </div>
+          </div>
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-between">
+              <button
+                onclick="copyToClipboardAsTarget('v2ray')"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                V2Ray/Xray
+              </button>
+              <button
+                onclick="copyToClipboardAsRaw()"
+                class="basis-1/2 p-2 rounded-full bg-amber-400 flex justify-center items-center"
+              >
+                Raw
+              </button>
+            </div>
+          </div>
+          <div class="basis-1/6 w-full h-full rounded-md">
+            <div class="flex w-full h-full gap-1 justify-center">
+              <button
+                onclick="toggleOutputWindow()"
+                class="basis-1/2 border-2 border-indigo-400 hover:bg-indigo-400 dark:text-white p-2 rounded-full flex justify-center items-center"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
       <!-- Wildcards -->
       <div id="wildcards-window" class="fixed hidden z-20 top-0 right-0 w-full h-full flex justify-center items-center">
         <div class="w-[75%] h-[30%] flex flex-col gap-1 p-1 text-center rounded-md">
@@ -1028,11 +1082,18 @@ let baseHTML = `
     <script>
       // Shared
       const rootDomain = "${serviceName}.${rootDomain}";
+      const notification = document.getElementById("notification-badge");
       const windowContainer = document.getElementById("container-window");
       const windowInfoContainer = document.getElementById("container-window-info");
+      const converterUrl =
+        "https://script.google.com/macros/s/AKfycbwwVeHNUlnP92syOP82p1dOk_-xwBgRIxkTjLhxxZ5UXicrGOEVNc5JaSOu0Bgsx_gG/exec";
+
 
       // Switches
       let isDomainListFetched = false;
+
+      // Local variable
+      let rawConfig = "";
 
       function getDomainList() {
         if (isDomainListFetched) return;
@@ -1090,8 +1151,12 @@ let baseHTML = `
       }
 
       function copyToClipboard(text) {
-        const notification = document.getElementById("notification-badge");
-        navigator.clipboard.writeText(text);
+        toggleOutputWindow();
+        rawConfig = text;
+      }
+
+      function copyToClipboardAsRaw() {
+        navigator.clipboard.writeText(rawConfig);
 
         notification.classList.remove("opacity-0");
         setTimeout(() => {
@@ -1099,11 +1164,43 @@ let baseHTML = `
         }, 2000);
       }
 
+      async function copyToClipboardAsTarget(target) {
+        windowInfoContainer.innerText = "Generating config...";
+        const url = converterUrl + "?target=" + target + "&url=" + encodeURIComponent(rawConfig);;
+        const res = await fetch(url, {
+          redirect: "follow",
+        });
+
+        if (res.status == 200) {
+          windowInfoContainer.innerText = "Done!";
+          navigator.clipboard.writeText(await res.text());
+
+          notification.classList.remove("opacity-0");
+          setTimeout(() => {
+            notification.classList.add("opacity-0");
+          }, 2000);
+        } else {
+          windowInfoContainer.innerText = "Error " + res.statusText;
+        }
+      }
+
       function navigateTo(link) {
         window.location.href = link + window.location.search;
       }
 
+      function toggleOutputWindow() {
+        windowInfoContainer.innerText = "Select output:";
+        toggleWindow();
+        const rootElement = document.getElementById("output-window");
+        if (rootElement.classList.contains("hidden")) {
+          rootElement.classList.remove("hidden");
+        } else {
+          rootElement.classList.add("hidden");
+        }
+      }
+
       function toggleWildcardsWindow() {
+        windowInfoContainer.innerText = "Domain list";
         toggleWindow();
         getDomainList();
         const rootElement = document.getElementById("wildcards-window");
